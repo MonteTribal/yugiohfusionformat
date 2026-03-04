@@ -146,6 +146,35 @@
       margin-bottom: 20px;
     }
 
+    /* ── File badges ── */
+    .file-badge {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 8px 14px;
+      flex: 1; min-width: 180px;
+    }
+    .badge-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+      background: var(--muted);
+      transition: background .3s;
+    }
+    .badge-dot.ok    { background: #6aaa30; box-shadow: 0 0 6px #6aaa3080; }
+    .badge-dot.error { background: #c04040; }
+    .badge-dot.loading {
+      background: var(--gold);
+      animation: blink .8s ease-in-out infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+    .badge-label {
+      font-family: 'Cinzel', serif;
+      font-size: .72rem; letter-spacing: .1em;
+      color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .badge-dot.ok ~ .badge-label { color: var(--text); }
+
     /* ── Upload zones ── */
     .uploads { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 28px; }
 
@@ -180,7 +209,8 @@
     .upload-zone.loaded .upload-status { color: var(--gold); }
 
     /* ── Sample size ── */
-    .controls { display: flex; align-items: center; gap: 16px; margin-bottom: 28px; flex-wrap: wrap; }
+    .controls { display: flex; align-items: center; gap: 16px; margin-bottom: 0; flex-wrap: wrap; }
+    .controls:last-of-type { margin-bottom: 28px; }
     .control-label {
       font-family: 'Cinzel', serif;
       font-size: .7rem; letter-spacing: .15em; text-transform: uppercase;
@@ -342,18 +372,16 @@
     <div class="divider"><div class="divider-gem"></div></div>
 
     <div class="panel">
-      <div class="panel-title">◈ Sacred Texts — Upload JSON Files</div>
+      <div class="panel-title">◈ Sacred Texts</div>
 
-      <div class="uploads">
-        <div class="upload-zone" id="zone-fusion">
-          <input type="file" accept=".json" id="file-fusion" />
-          <span class="upload-label">Fusion Cards</span>
-          <span class="upload-status" id="status-fusion">fusion_cards.json</span>
+      <div class="file-status-row" style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
+        <div class="file-badge" id="badge-fusion">
+          <span class="badge-dot" id="dot-fusion"></span>
+          <span class="badge-label" id="label-fusion">Loading fusion_cards.json…</span>
         </div>
-        <div class="upload-zone" id="zone-staples">
-          <input type="file" accept=".json" id="file-staples" />
-          <span class="upload-label">Staples (optional)</span>
-          <span class="upload-status" id="status-staples">fusion_spell_trap_staples.json</span>
+        <div class="file-badge" id="badge-staples">
+          <span class="badge-dot" id="dot-staples"></span>
+          <span class="badge-label" id="label-staples">Loading staples…</span>
         </div>
       </div>
 
@@ -361,7 +389,9 @@
         <span class="control-label">Fusion Cards Sampled</span>
         <input type="range" id="sample-size" min="5" max="40" value="20" step="1" />
         <span class="control-value" id="sample-display">20</span>
-        <span class="control-label" style="margin-left:16px;">Staples Added</span>
+      </div>
+      <div class="controls" style="margin-top:12px;">
+        <span class="control-label">Staples Added</span>
         <input type="range" id="staples-count" min="0" max="30" value="15" step="1" />
         <span class="control-value" id="staples-display">15</span>
       </div>
@@ -418,6 +448,52 @@
   let fusionData  = null;
   let staplesData = null;
 
+  // ── Auto-fetch JSON files from same repo ──────────────────────────────────
+  function setBadge(which, state, text) {
+    const dot   = document.getElementById(`dot-${which}`);
+    const label = document.getElementById(`label-${which}`);
+    dot.className   = "badge-dot " + state;
+    label.textContent = text;
+  }
+
+  async function fetchJSON(path) {
+    const resp = await fetch(path);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  }
+
+  function extractCards(data) {
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.data)) return data.data;
+    return [];
+  }
+
+  async function loadRepoFiles() {
+    // fusion_cards.json — required
+    setBadge("fusion", "loading", "Loading fusion_cards.json…");
+    try {
+      const data = await fetchJSON("fusion_cards.json");
+      fusionData = extractCards(data);
+      setBadge("fusion", "ok", `fusion_cards.json  (${fusionData.length} cards)`);
+    } catch(e) {
+      setBadge("fusion", "error", `fusion_cards.json — not found`);
+    }
+
+    // staples — optional
+    setBadge("staples", "loading", "Loading staples…");
+    try {
+      const data = await fetchJSON("fusion_spell_trap_staples.json");
+      staplesData = extractCards(data);
+      setBadge("staples", "ok", `staples  (${staplesData.length} cards)`);
+    } catch(e) {
+      setBadge("staples", "error", "staples — not found (optional)");
+    }
+
+    updateRunBtn();
+  }
+
+  loadRepoFiles();
+
   function log(msg, cls = "") {
     logPanel.classList.add("visible");
     const line = document.createElement("div");
@@ -436,47 +512,9 @@
   // ─────────────────────────────────────────────────────────────────────────────
   // File loading
   // ─────────────────────────────────────────────────────────────────────────────
-  function loadJSON(file) {
-    return new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onload  = e => { try { resolve(JSON.parse(e.target.result)); } catch(err) { reject(err); } };
-      r.onerror = () => reject(new Error("File read failed"));
-      r.readAsText(file);
-    });
-  }
-
-  function extractCards(data) {
-    if (Array.isArray(data)) return data;
-    if (data && Array.isArray(data.data)) return data.data;
-    return [];
-  }
-
   function updateRunBtn() {
     runBtn.disabled = !fusionData;
   }
-
-  document.getElementById("file-fusion").addEventListener("change", async e => {
-    const f = e.target.files[0]; if (!f) return;
-    try {
-      fusionData = extractCards(await loadJSON(f));
-      document.getElementById("status-fusion").textContent = `✓ ${f.name} (${fusionData.length} cards)`;
-      document.getElementById("zone-fusion").classList.add("loaded");
-      updateRunBtn();
-    } catch(err) {
-      log("Failed to load fusion_cards.json: " + err.message, "error");
-    }
-  });
-
-  document.getElementById("file-staples").addEventListener("change", async e => {
-    const f = e.target.files[0]; if (!f) return;
-    try {
-      staplesData = extractCards(await loadJSON(f));
-      document.getElementById("status-staples").textContent = `✓ ${f.name} (${staplesData.length} cards)`;
-      document.getElementById("zone-staples").classList.add("loaded");
-    } catch(err) {
-      log("Failed to load staples: " + err.message, "error");
-    }
-  });
 
   // ─────────────────────────────────────────────────────────────────────────────
   // Range sliders
