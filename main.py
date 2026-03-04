@@ -1,8 +1,8 @@
-"""
-Created by MonteTribal
-Posted to: https://github.com/MonteTribal/yugiohfusionformat
-License: Creative Commons Zero v1.0 Universal
+# Created by MonteTribal
+# Posted to: https://github.com/MonteTribal/yugiohfusionformat
+# License: Creative Commons Zero v1.0 Universal
 
+"""
 Reads fusion_cards.json (output of get_fusion_cards.py).
 Picks 20 random cards and extracts fusion material info from the first line of each desc.
 
@@ -63,6 +63,19 @@ MAIN_DECK_MONSTER_TYPES = [
     "Gemini Monster",
     "Normal Monster",
     "Normal Tuner Monster",
+    "Pendulum Effect Monster",
+    "Pendulum Effect Ritual Monster",
+    "Pendulum Flip Effect Monster",
+    "Pendulum Normal Monster",
+    "Pendulum Tuner Effect Monster",
+    "Ritual Effect Monster",
+    "Ritual Monster",
+    "Spell Card",
+    "Spirit Monster",
+    "Toon Monster",
+    "Trap Card",
+    "Tuner Monster",
+    "Union Effect Monster",
 ]
 
 QUOTED_RE = re.compile(r'"([^"]+)"')
@@ -238,9 +251,12 @@ def resolve_materials(card: dict, collected: dict,
                       indent: str = "    ", verbose: bool = True):
     """
     Parse the first desc line of a card, search for its materials, register them.
+    Also checks the full desc for 'Must be Special Summoned with' sentences and
+    registers any quoted card names found there too.
     Called for the initial 20 cards and recursively for any fusion materials found.
     """
-    first_line = card.get("desc", "").split("\n")[0].strip()
+    desc       = card.get("desc", "")
+    first_line = desc.split("\n")[0].strip()
 
     if verbose:
         print(f"{indent}Mat  : {first_line}")
@@ -270,6 +286,21 @@ def resolve_materials(card: dict, collected: dict,
             if verbose:
                 print(f"{indent}  → {fc['name']}  [{fc.get('type','?')}]"
                       f"  ATK/{fc.get('atk','?')}  DEF/{fc.get('def','?')}")
+
+    # ── 'Must be Special Summoned with' check ────────────────────────────────
+    SUMMON_WITH_RE = re.compile(
+        r'must (?:first )?be special summoned with (.+?)(?:\.|$)',
+        re.IGNORECASE
+    )
+    for match in SUMMON_WITH_RE.finditer(desc):
+        snippet  = match.group(0)
+        names    = QUOTED_RE.findall(snippet)
+        for name in names:
+            if len(name) < 2 or ". " in name:
+                continue
+            register_exact(collected, name)
+            if verbose:
+                print(f"{indent}▸ summon-with card: \"{name}\"  → (registered)")
 
 
 def run_initial_pass(sample: list[dict], collected: dict, verbose: bool = True):
