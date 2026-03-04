@@ -441,6 +441,7 @@
     "Trap Card","Tuner Monster","Union Effect Monster",
   ];
   const POLYMERIZATION_ID  = 24094653;
+  const FUTURE_FUSION_ID   = 77565204;
   const QUOTED_RE          = /"([^"]+)"/g;
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -538,7 +539,11 @@
   function classifySegment(raw) {
     raw = raw.trim();
     const seg = { raw, kind: null, name: null, archetype: null,
-                  attribute: null, race: null, extraType: null };
+                  attribute: null, race: null, extraType: null, level: null, quantity: 1 };
+
+    // Extract leading quantity e.g. "3 Level 10 monsters" → quantity=3
+    const qm = raw.match(/^(\d+)\s+/);
+    if (qm) seg.quantity = parseInt(qm[1]);
 
     const quoted = [];
     let m;
@@ -549,7 +554,7 @@
     if (quoted.length === 0) {
       seg.kind = "generic";
       extractGeneric(seg, raw);
-    } else if (outside && /\b(monster|card|fusion|synchro|xyz|link)\b/i.test(outside)) {
+    } else if (outside && /\b(monsters?|cards?|fusion|synchro|xyz|link)\b/i.test(outside)) {
       seg.kind      = "archetype";
       seg.archetype = quoted[0];
       extractGeneric(seg, outside);
@@ -561,13 +566,26 @@
   }
 
   function extractGeneric(seg, text) {
+    seg.level = null;
+    // Check for explicit type phrases first so "Normal Monster" sets extraType, not race=Normal
+    const typeKeywords = [...EXTRA_DECK_TYPES, "Normal", "Tuner", "Gemini", "Spirit", "Toon", "Union"];
+    for (const t of typeKeywords) {
+      const pat = new RegExp(`\\b${t}\\s+Monster\\b`, "i");
+      if (pat.test(text)) {
+        seg.extraType = t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+        break;
+      }
+    }
     for (const w of text.split(/[\s\-\/]+/)) {
       const clean = w.replace(/[.,]/g, "");
-      if (ATTRIBUTES.has(clean.toUpperCase()))           seg.attribute = clean.toUpperCase();
+      if (ATTRIBUTES.has(clean.toUpperCase())) seg.attribute = clean.toUpperCase();
       const cap = clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
-      if (RACES.has(cap))                                seg.race = cap;
-      if (EXTRA_DECK_TYPES.has(cap))                     seg.extraType = cap;
+      if (RACES.has(cap) && cap !== seg.extraType) seg.race = cap;
+      if (seg.extraType === null && EXTRA_DECK_TYPES.has(cap)) seg.extraType = cap;
     }
+    // Extract level e.g. "Level 10", "Level 7 or higher"
+    const lm = text.match(/\bLevel\s+(\d+)/i);
+    if (lm) seg.level = parseInt(lm[1]);
   }
 
   function parseSegments(firstLine) {
@@ -581,7 +599,7 @@
   // ─────────────────────────────────────────────────────────────────────────────
   // API helpers
   // ─────────────────────────────────────────────────────────────────────────────
-  async function apiQuery(params) {
+  async function apiQuery(params, count = 3) {
     const qs = new URLSearchParams(params).toString();
     const url = `${API_BASE}?${qs}`;
     try {
@@ -589,7 +607,8 @@
       if (resp.status === 400) return [];
       if (!resp.ok) { log(`API HTTP ${resp.status}`, "warn"); return []; }
       const data = await resp.json();
-      return (data.data || []).slice(0, 3);
+      const all = data.data || [];
+      return sampleArray(all, count);
     } catch(e) {
       log(`API error: ${e.message}`, "warn");
       return [];
@@ -605,9 +624,13 @@
       params.archetype = seg.archetype;
       if (seg.attribute) params.attribute = seg.attribute;
       if (seg.race)      params.race = seg.race;
+      if (seg.level)     params.level = seg.level;
+      // Archetype materials are always monsters — add random type to avoid spells/traps
+      params.type = MAIN_DECK_TYPES[Math.floor(Math.random() * MAIN_DECK_TYPES.length)];
     } else {
       if (seg.attribute) params.attribute = seg.attribute;
       if (seg.race)      params.race = seg.race;
+      if (seg.level)     params.level = seg.level;
       if (seg.extraType) {
         params.type = `${seg.extraType} Monster`;
       } else {
@@ -616,7 +639,7 @@
     }
     if (Object.keys(params).length === 0) return [];
     await sleep(100);
-    return apiQuery(params);
+    return apiQuery(params, seg.quantity);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -725,22 +748,54 @@
         }
       }
 
-      // Resolve exact-name placeholders
-      const placeholders = [...collected.entries()].filter(([, e]) => e.card.type === "—");
-      if (placeholders.length) {
-        log(`  ◈ Resolving ${placeholders.length} exact-name card(s)...`);
-        for (const [key, entry] of placeholders) {
-          const name = entry.card.name;
-          const results = await apiQuery({ name });
-          if (results.length) {
-            const full = results[0];
-            entry.card = full;
-            const newId = full.id;
-            if (newId && !collected.has(newId)) { collected.set(newId, entry); collected.delete(key); }
+      // Resolve exact-name placeholders — returns set of newly resolved IDs
+      async function resolveExactIds() {
+        const placeholders = [...collected.entries()].filter(([, e]) => e.card.type === "—");
+        const newlyResolved = new Set();
+        if (placeholders.length) {
+          log(`  ◈ Resolving ${placeholders.length} exact-name card(s)...`);
+          for (const [key, entry] of placeholders) {
+            const name = entry.card.name;
+            const results = await apiQuery({ name }, 1);
+            if (results.length) {
+              const full = results[0];
+              const newId = full.id;
+              entry.card = full;
+              collected.delete(key);
+              if (newId) {
+                if (collected.has(newId)) {
+                  collected.get(newId).sources = new Set([...collected.get(newId).sources, ...entry.sources]);
+                } else {
+                  collected.set(newId, entry);
+                }
+                newlyResolved.add(newId);
+              }
+            }
+            await sleep(100);
           }
-          await sleep(100);
+        }
+        return newlyResolved;
+      }
+
+      const newlyResolved = await resolveExactIds();
+
+      // Remove newly resolved from resolvedIds so second pass can process them
+      for (const id of newlyResolved) resolvedIds.delete(id);
+
+      // Second recursive pass: catches fusions promoted from exact-name placeholders
+      let extraIter = 0;
+      while (true) {
+        const pending = [...collected.values()]
+          .filter(e => isFusion(e.card) && !resolvedIds.has(e.card.id) && e.card.id != null);
+        if (!pending.length) break;
+        extraIter++;
+        log(`  ↺ Pass ${iteration + extraIter} (post-exact): resolving ${pending.length} nested fusion(s)...`, "info");
+        for (const { card } of pending) {
+          resolvedIds.add(card.id);
+          await resolveMaterials(card, collected);
         }
       }
+      iteration += extraIter;
 
       // Staples
       let stapleIds = [];
@@ -776,8 +831,9 @@
         if (!uniqueMain.includes(id)) uniqueMain.push(id);
       }
 
-      // Always add 3x Polymerization
+      // Always add 3x Polymerization + 3x Future Fusion
       uniqueMain.push(POLYMERIZATION_ID, POLYMERIZATION_ID, POLYMERIZATION_ID);
+      uniqueMain.push(FUTURE_FUSION_ID,  FUTURE_FUSION_ID,  FUTURE_FUSION_ID);
 
       // Encode
       function encode(lst) {

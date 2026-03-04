@@ -113,7 +113,16 @@ class Segment:
         self.attribute  = None
         self.race       = None
         self.extra_type = None
+        self.level      = None
+        self.quantity   = 1     # how many of this material are required
+        self._parse_quantity()
         self._classify()
+
+    def _parse_quantity(self):
+        """Extract leading integer quantity, e.g. '3 Level 10 monsters' → quantity=3."""
+        m = re.match(r'^(\d+)\s+', self.raw)
+        if m:
+            self.quantity = int(m.group(1))
 
     def _classify(self):
         quoted  = QUOTED_RE.findall(self.raw)
@@ -122,7 +131,7 @@ class Segment:
         if not quoted:
             self.kind = self.KIND_GENERIC
             self._extract_generic(self.raw)
-        elif outside and re.search(r'\b(monster|card|fusion|synchro|xyz|link)\b',
+        elif outside and re.search(r'\b(monsters?|cards?|fusion|synchro|xyz|link)\b',
                                     outside, re.IGNORECASE):
             self.kind      = self.KIND_ARCHETYPE
             self.archetype = quoted[0].strip()
@@ -132,18 +141,33 @@ class Segment:
             self.name = quoted[0].strip()
 
     def _extract_generic(self, text: str):
+        self.level = None
+        # Check for explicit type phrases BEFORE word-by-word extraction,
+        # so "Normal Monster" sets extra_type rather than race=Normal.
+        for t in EXTRA_DECK_TYPES | {"Normal", "Tuner", "Gemini", "Spirit", "Toon", "Union"}:
+            pattern = re.compile(rf'\b{re.escape(t)}\s+Monster\b', re.IGNORECASE)
+            if pattern.search(text):
+                self.extra_type = t.capitalize()
+                break
         for w in re.split(r'[\s\-/]+', text):
             w = w.strip(".,")
             if w.upper() in ATTRIBUTES:
                 self.attribute = w.upper()
-            if w.capitalize() in RACES:
+            # Don't set race to a word that was already consumed as extra_type
+            if w.capitalize() in RACES and w.capitalize() != self.extra_type:
                 self.race = w.capitalize()
-            if w.capitalize() in EXTRA_DECK_TYPES:
+            # Only set extra_type from EXTRA_DECK_TYPES if not already set above
+            if self.extra_type is None and w.capitalize() in EXTRA_DECK_TYPES:
                 self.extra_type = w.capitalize()
+        # Extract level/rank: "Level 10", "Level 7 or higher", etc. — grab the first number
+        level_match = re.search(r'\bLevel\s+(\d+)', text, re.IGNORECASE)
+        if level_match:
+            self.level = int(level_match.group(1))
 
     def describe(self) -> str:
+        qty = f"x{self.quantity} " if self.quantity > 1 else ""
         if self.kind == self.KIND_EXACT:
-            return f'exact card: "{self.name}"'
+            return f'{qty}exact card: "{self.name}"'
         parts = []
         if self.kind == self.KIND_ARCHETYPE:
             parts.append(f'archetype="{self.archetype}"')
@@ -153,7 +177,10 @@ class Segment:
             parts.append(f"race={self.race}")
         if self.extra_type:
             parts.append(f"type={self.extra_type} Monster")
-        return "  |  ".join(parts) if parts else f'raw="{self.raw}"'
+        if self.level:
+            parts.append(f"level={self.level}")
+        desc = "  |  ".join(parts) if parts else f'raw="{self.raw}"'
+        return f"{qty}{desc}"
 
 
 def parse_segments(first_line: str) -> list[Segment]:
@@ -169,14 +196,15 @@ def parse_segments(first_line: str) -> list[Segment]:
 
 # ── API helpers ───────────────────────────────────────────────────────────────
 
-def api_query(params: dict, verbose: bool = True) -> list[dict]:
-    """Execute a parameterised API request; return up to 3 results."""
+def api_query(params: dict, count: int = 3, verbose: bool = True) -> list[dict]:
+    """Execute a parameterised API request; return a random sample of `count` results."""
     url = f"{API_BASE}?{urllib.parse.urlencode(params)}"
     try:
         req = urllib.request.Request(url, headers=HEADERS)
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data.get("data", [])[:3]
+            all_results = data.get("data", [])
+            return random.sample(all_results, min(count, len(all_results)))
     except urllib.error.HTTPError as e:
         if e.code == 400:
             return []   # 400 = no results, normal
@@ -201,11 +229,20 @@ def search_segment(seg: Segment, verbose: bool = True) -> list[dict]:
             params["attribute"] = seg.attribute
         if seg.race:
             params["race"] = seg.race
+        if seg.level:
+            params["level"] = str(seg.level)
+        # Archetype materials are always monsters — add a random type filter
+        # so we don't pull spells/traps from the archetype pool
+        params["type"] = random.choice(MAIN_DECK_MONSTER_TYPES)
+        if verbose:
+            print(f"      [type] randomly selected: \"{params['type']}\"")
     elif seg.kind == Segment.KIND_GENERIC:
         if seg.attribute:
             params["attribute"] = seg.attribute
         if seg.race:
             params["race"] = seg.race
+        if seg.level:
+            params["level"] = str(seg.level)
         if seg.extra_type:
             # Explicit extra-deck type from the material line (e.g. "Fusion Monster")
             params["type"] = f"{seg.extra_type} Monster"
@@ -219,7 +256,7 @@ def search_segment(seg: Segment, verbose: bool = True) -> list[dict]:
         return []
 
     time.sleep(0.1)
-    return api_query(params, verbose=verbose)
+    return api_query(params, count=seg.quantity, verbose=verbose)
 
 
 # ── Registry helpers ──────────────────────────────────────────────────────────
@@ -266,9 +303,11 @@ def resolve_materials(card: dict, collected: dict,
             print(f"{indent}▸ {seg.describe()}")
 
         if seg.kind == Segment.KIND_EXACT:
-            register_exact(collected, seg.name)
+            for _ in range(seg.quantity):
+                register_exact(collected, seg.name)
             if verbose:
-                print(f"{indent}  → (specific card — no lookup needed)")
+                qty_str = f" x{seg.quantity}" if seg.quantity > 1 else ""
+                print(f"{indent}  → (specific card{qty_str} — no lookup needed)")
             continue
 
         results = search_segment(seg, verbose=verbose)
@@ -357,10 +396,12 @@ def run_recursive_passes(collected: dict, resolved_ids: set,
     return iteration
 
 
-def resolve_exact_ids(collected: dict, verbose: bool = True):
+def resolve_exact_ids(collected: dict, verbose: bool = True) -> set:
     """
     For any exact-name placeholder (type == "—"), query the API by exact name
     and replace the placeholder with the full card data if found.
+    Returns the set of newly-resolved IDs so the caller can decide whether
+    to run another recursive pass.
     """
     placeholders = [
         (key, entry)
@@ -369,14 +410,16 @@ def resolve_exact_ids(collected: dict, verbose: bool = True):
     ]
 
     if not placeholders:
-        return
+        return set()
 
     if verbose:
         print(f"\n[Resolving {len(placeholders)} exact-name placeholder(s)...]")
 
+    newly_resolved: set = set()
+
     for key, entry in placeholders:
         name = entry["card"].get("name", "")
-        params = {"name": name}   # exact name match
+        params = {"name": name}
         url = f"{API_BASE}?{urllib.parse.urlencode(params)}"
         try:
             req = urllib.request.Request(url, headers=HEADERS)
@@ -385,13 +428,20 @@ def resolve_exact_ids(collected: dict, verbose: bool = True):
                 results = data.get("data", [])
             if results:
                 full_card = results[0]
+                new_id    = full_card.get("id")
                 entry["card"] = full_card
-                new_id = full_card.get("id")
-                if new_id and new_id not in collected:
-                    collected[new_id] = entry
-                    del collected[key]
+                # Remove the string-keyed placeholder
+                del collected[key]
+                if new_id:
+                    if new_id in collected:
+                        # Card already in collected (e.g. found earlier as a
+                        # fusion selection) — merge sources but don't overwrite
+                        collected[new_id]["sources"].update(entry["sources"])
+                    else:
+                        collected[new_id] = entry
+                    newly_resolved.add(new_id)
                 if verbose:
-                    print(f"  ✓ {name:<45} → ID {full_card.get('id', '?')}")
+                    print(f"  ✓ {name:<45} → ID {new_id or '?'}")
             else:
                 if verbose:
                     print(f"  ✗ {name:<45} → not found")
@@ -402,6 +452,8 @@ def resolve_exact_ids(collected: dict, verbose: bool = True):
             if verbose:
                 print(f"  ✗ {name:<45} → error: {e}")
         time.sleep(0.1)
+
+    return newly_resolved
 
 
 def print_final_list(collected: dict, iteration: int, verbose: bool = True):
@@ -549,8 +601,10 @@ def build_deck_url(collected: dict, staples: list[dict],
     main_deck.extend(staple_ids)
 
     # Always append 3 copies of Polymerization
-    POLYMERIZATION = {"id": 24094653, "name": "Polymerization"}
+    POLYMERIZATION  = {"id": 24094653, "name": "Polymerization"}
+    FUTURE_FUSION   = {"id": 77565204,   "name": "Future Fusion"}
     main_deck.extend([POLYMERIZATION["id"]] * 3)
+    main_deck.extend([FUTURE_FUSION["id"]]  * 3)
 
     if verbose_staples and staple_ids:
         print(f"\n  Staples added to main deck ({len(staple_ids)}):")
@@ -560,6 +614,7 @@ def build_deck_url(collected: dict, staples: list[dict],
 
     if verbose_staples:
         print(f"\n  Polymerization x3  [{POLYMERIZATION['id']}] added.")
+        print(f"  Future Fusion  x3  [{FUTURE_FUSION['id']}] added.")
 
     if verbose_deck:
         print(f"\n{'=' * 68}")
@@ -626,7 +681,19 @@ def main():
         collected, resolved_ids, verbose=VERBOSE_RECURSIVE
     )
 
-    resolve_exact_ids(collected, verbose=VERBOSE_LOAD)
+    newly_resolved = resolve_exact_ids(collected, verbose=VERBOSE_LOAD)
+
+    # Remove newly-resolved IDs from resolved_ids so the second recursive pass
+    # will process them — even if they were seen before (e.g. ABC-Dragon Buster
+    # or XYZ-Dragon Cannon appearing both as a random pick and as an exact material).
+    resolved_ids -= newly_resolved
+
+    # Second recursive pass: catches fusions promoted from exact-name placeholders.
+    extra_iterations = run_recursive_passes(
+        collected, resolved_ids, verbose=VERBOSE_RECURSIVE
+    )
+    iteration += extra_iterations
+
     print_final_list(collected, iteration, verbose=VERBOSE_FINAL_LIST)
     staples = load_staples(STAPLES_JSON, STAPLES_COUNT, verbose=VERBOSE_STAPLES)
     build_deck_url(collected, staples, verbose_deck=VERBOSE_DECK, verbose_staples=VERBOSE_STAPLES)
