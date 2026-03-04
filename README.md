@@ -3,4 +3,6 @@ generates a YGOPRODECK.com decklist based on fusions. Decks are not good, but me
 
 May need to download the json files to toss them into the UI. i am bad at html
 
-https://montetribal.github.io/yugiohfusionformat/ 
+<a href="https://montetribal.github.io/yugiohfusionformat/" target="_blank" rel="noopener noreferrer">
+  Yu‑Gi‑Oh Fusion Format
+</a>
